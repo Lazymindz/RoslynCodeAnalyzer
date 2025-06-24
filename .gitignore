@@ -1,0 +1,57 @@
+# .NET build artifacts
+bin/
+obj/
+out/
+
+# User-specific files
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+
+# VS Code settings
+.vscode/
+
+# Rider settings
+.idea/
+
+# Build results
+*.dll
+*.exe
+*.app
+*.log
+
+# NuGet packages
+*.nupkg
+# The packages folder can be ignored because of PackageReference
+packages/
+# NuGet v3's project.json files produces this folder
+project.lock.json
+project.fragment.lock.json
+artifacts/
+
+# OS generated files
+.DS_Store
+Thumbs.db
+
+# Test results
+TestResults/
+*.TestResults/
+
+# Others
+*.vspscc
+*.vssscc
+*.pdb
+*.cache
+*.dbmdl
+*.bak
+*.backup
+*.swp
+*.tmp
+
+# RoslynCodeAnalyzer output files
+*_codecontext.log
+*_analyzer.log
+
+# Dotnet CLI
+*.dotnet/
