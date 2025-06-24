@@ -1,6 +1,6 @@
 # RoslynCodeAnalyzer
 
-A production-grade C# console tool for analyzing .NET solutions and projects using Roslyn. Outputs a code context file (symbol definitions and references) and a detailed log file.
+A C# console tool for analyzing .NET solutions and projects using Roslyn. Outputs a code context file (symbol definitions and references) and a detailed log file.
 
 ---
 
@@ -45,6 +45,8 @@ RoslynCodeAnalyzer --help
 
 Both files are written to the specified output directory (or current directory by default).
 
+> **Note:** All file paths and examples in this documentation are placeholders and do not reference any real user or system data.
+
 ---
 
 ## Example
@@ -82,8 +84,8 @@ References:
 **Log File Example:**
 ```
 2025-06-24 12:15:33 RoslynCodeAnalyzer started.
-2025-06-24 12:15:33 Input: C:\Path\To\MySolution.sln
-2025-06-24 12:15:33 Output directory: C:\Path\To\analysis
+2025-06-24 12:15:33 Input: /path/to/MySolution.sln
+2025-06-24 12:15:33 Output directory: /path/to/analysis
 2025-06-24 12:15:33 Loading workspace... This might take a moment.
 2025-06-24 12:15:36 Workspace loaded. Finding symbols and references...
 2025-06-24 12:15:44 Found 16387 total symbols to analyze.
