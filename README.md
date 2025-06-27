@@ -258,10 +258,12 @@ RoslynCodeAnalyzer can be seamlessly integrated with AI coding agents such as **
 
 ```mermaid
 graph TD
-  A[AI Agent] --> RunCLI[Run CLI] --> B[RoslynCodeAnalyzer]
-  B --> Output[Output (JSON/MD)] --> C[AI Agent]
-  C --> Parse[Parse & Analyze] --> D[Suggest/Apply Code Actions]
-  D --> Repeat[Repeat as needed] --> A
+  Agent --> CLI
+  CLI --> Analyzer
+  Analyzer --> Output
+  Output --> Agent
+  Agent --> Actions
+  Actions --> Agent
 ```
 
 ---
