@@ -1,5 +1,23 @@
 # RoslynCodeAnalyzer
 
+**RoslynCodeAnalyzer** is a C# console tool designed to empower AI coding agents and developers with deep, configurable analysis of large .NET solutions and projects. Leveraging the Roslyn compiler platform, it outputs a comprehensive code context file—detailing symbol definitions, references, and code snippets—alongside a detailed operational log. The tool is highly configurable, allowing users (or AI agents) to filter by symbol, control the depth of relationship analysis, and select the desired output format (plain text, JSON, or Markdown).
+
+**Key strengths for AI agent integration:**
+- **Machine-Readable Output:** Produces structured JSON or Markdown files, making it easy for AI agents to parse and understand symbol relationships, references, and code locations.
+- **Configurable Granularity:** Agents can tailor the analysis to focus on specific symbols, relationship types (direct, references, inheritance, all), and snippet detail (none, line, block), ensuring only the most relevant context is extracted for code navigation, refactoring, or automated actions.
+- **Separation of Concerns:** Outputs analysis results and operational logs to separate files, simplifying downstream processing and error handling for agents.
+- **Relative Paths:** All file paths in the output are relative to the solution/project, supporting portability and easier mapping in large codebases.
+- **Robust CLI:** Modern command-line interface with clear help, error handling, and extensibility for future enhancements.
+
+**How AI agents use RoslynCodeAnalyzer:**
+1. **Invoke via Shell:** The agent runs RoslynCodeAnalyzer with desired options (e.g., filter by symbol, set output format to JSON).
+2. **Parse Output:** The agent reads the generated code context file to extract symbol definitions, references, and code snippets.
+3. **Automate Actions:** Using this context, the agent can perform advanced code navigation, suggest or apply refactorings, and provide context-aware code completions or explanations—even in very large C# codebases.
+
+**Best for:**
+- AI agents (like Cline, Cursor, Claude Code, Gemini CLI) that need precise, scalable, and customizable code analysis for large C# projects.
+- Scenarios where understanding symbol relationships, references, and code structure is critical for automation or advanced code assistance.
+
 A C# console tool for analyzing .NET solutions and projects using Roslyn. Outputs a code context file (symbol definitions and references, with configurable detail and format) and a detailed log file.
 
 ---
