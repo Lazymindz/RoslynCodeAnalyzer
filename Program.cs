@@ -1,5 +1,6 @@
 ﻿// Program.cs
 using Microsoft.CodeAnalysis;
+using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
 using Microsoft.CodeAnalysis.FindSymbols;
 using Microsoft.CodeAnalysis.MSBuild;
@@ -9,575 +10,655 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Text.Json;
+using System.Text.Json.Serialization;
 using System.Threading.Tasks;
+
+// =================================================================================
+// 1. MAIN PROGRAM & CLI SETUP
+// =================================================================================
 
 public class Program
 {
     public static async Task<int> Main(string[] args)
     {
-        // Define CLI options
-        var inputOption = new Option<FileInfo>(
-            new[] { "--input", "-i" },
-            "Path to the solution (.sln) or project (.csproj) file to analyze."
-        )
-        {
-            IsRequired = true,
-            ArgumentHelpName = "input"
-        };
+        // --- CLI Options ---
+        var targetSymbolOption = new Option<string>(
+            new[] { "--target-symbol", "-s" },
+            "Analyze a specific symbol using its full, exact name (e.g., 'MyNamespace.MyClass.MyMethod(...)'). Best for scripts."
+        ) { ArgumentHelpName = "exact-symbol-name" };
+
+        var targetMethodOption = new Option<string>(
+            new[] { "--method", "-m" },
+            "Analyze a method by its short name (e.g., 'MyMethod'). If the name is ambiguous, you will be prompted to choose."
+        ) { ArgumentHelpName = "short-method-name" };
+
+        var analysisModeOption = new Option<AnalysisMode>(
+            new[] { "--analysis-mode", "-a" }, () => AnalysisMode.Full, "Analysis mode: 'References', 'Analyze', or 'Full'."
+        ) { ArgumentHelpName = "mode" };
+
+        var depthOption = new Option<int>(
+            new[] { "--depth", "-d" }, () => 0, "Recursion depth for call chain analysis."
+        ) { ArgumentHelpName = "level" };
 
         var outputOption = new Option<DirectoryInfo>(
-            new[] { "--output", "-o" },
-            () => new DirectoryInfo(Directory.GetCurrentDirectory()),
-            "Directory to write output files. Defaults to current directory."
-        )
-        {
-            ArgumentHelpName = "output"
-        };
-
-        // New CLI options
-        var symbolOption = new Option<string>(
-            new[] { "--symbol", "-s" },
-            "Symbol name or pattern to filter (optional)."
-        )
-        {
-            ArgumentHelpName = "symbol"
-        };
-
-        var relationLevelOption = new Option<string>(
-            new[] { "--relation-level", "-r" },
-            () => "direct",
-            "Relation level: direct, references, inheritance, all (default: direct)."
-        )
-        {
-            ArgumentHelpName = "relation-level"
-        };
-
-        var snippetLevelOption = new Option<string>(
-            new[] { "--snippet-level", "-n" },
-            () => "none",
-            "Snippet level: none, line, block (default: none)."
-        )
-        {
-            ArgumentHelpName = "snippet-level"
-        };
+            new[] { "--output", "-o" }, () => new DirectoryInfo(Directory.GetCurrentDirectory()), "Directory to write output files."
+        ) { ArgumentHelpName = "directory" };
 
         var outputFormatOption = new Option<string>(
-            new[] { "--output-format", "-f" },
-            () => "txt",
-            "Output format: txt, json, md (default: txt)."
-        )
+            new[] { "--output-format", "-f" }, () => "json", "Output format: json, md, txt."
+        ) { ArgumentHelpName = "format" };
+        
+        var rootCommand = new RootCommand("A C# static analysis tool for deep code exploration.")
         {
-            ArgumentHelpName = "output-format"
+            targetSymbolOption, targetMethodOption, analysisModeOption, depthOption, outputOption, outputFormatOption
         };
 
-        var rootCommand = new RootCommand("RoslynCodeAnalyzer - Analyze C# solutions and output code context and logs.")
+        // Ensure user provides one of the target options, but not both.
+        rootCommand.AddValidator(result =>
         {
-            inputOption,
-            outputOption,
-            symbolOption,
-            relationLevelOption,
-            snippetLevelOption,
-            outputFormatOption
-        };
+            if (result.FindResultFor(targetSymbolOption) != null && result.FindResultFor(targetMethodOption) != null)
+            {
+                result.ErrorMessage = "The options '--target-symbol' and '--method' cannot be used at the same time.";
+            }
+            if (result.FindResultFor(targetSymbolOption) == null && result.FindResultFor(targetMethodOption) == null)
+            {
+                result.ErrorMessage = "You must provide a target to analyze using either '--target-symbol' or '--method'.";
+            }
+        });
 
-        rootCommand.SetHandler(async (FileInfo input, DirectoryInfo output, string symbolPattern, string relationLevel, string snippetLevel, string outputFormat) =>
+        rootCommand.SetHandler(async (context) =>
         {
-            int exitCode = await RunAnalyzerAsync(input, output, symbolPattern, relationLevel, snippetLevel, outputFormat);
-            Environment.ExitCode = exitCode;
-        }, inputOption, outputOption, symbolOption, relationLevelOption, snippetLevelOption, outputFormatOption);
+            var parseResult = context.ParseResult;
+            var options = new AnalysisOptions
+            {
+                TargetSymbol = parseResult.GetValueForOption(targetSymbolOption),
+                TargetMethod = parseResult.GetValueForOption(targetMethodOption),
+                Mode = parseResult.GetValueForOption(analysisModeOption),
+                Depth = parseResult.GetValueForOption(depthOption),
+                Output = parseResult.GetValueForOption(outputOption)!,
+                OutputFormat = parseResult.GetValueForOption(outputFormatOption)!,
+                InputSolution = new FileInfo(GetSlnOrCsprojPath())
+            };
+            context.ExitCode = await RunAnalysis(options);
+        });
 
         return await rootCommand.InvokeAsync(args);
     }
 
-    // Updated RunAnalyzerAsync signature to accept new options
-private static async Task<int> RunAnalyzerAsync(FileInfo input, DirectoryInfo output, string symbolPattern, string relationLevel, string snippetLevel, string outputFormat)
+    private static async Task<int> RunAnalysis(AnalysisOptions options)
     {
         StreamWriter? logWriter = null;
-        StreamWriter? analysisWriter = null;
-
         try
         {
-            // Validate input file
-            if (input == null || !input.Exists)
+            if (!options.InputSolution.Exists)
             {
-                Console.Error.WriteLine($"ERROR: Input file not found or not specified.");
+                Console.Error.WriteLine($"ERROR: Could not find solution or project file.");
+                return 1;
+            }
+            options.Output.Create();
+
+            string baseName = Path.GetFileNameWithoutExtension(options.InputSolution.Name);
+            logWriter = new StreamWriter(Path.Combine(options.Output.FullName, $"{baseName}_analyzer.log"), false);
+            Action<string> log = message =>
+            {
+                string logMessage = $"{DateTime.Now:yyyy-MM-dd HH:mm:ss} | {message}";
+                Console.WriteLine(logMessage);
+                logWriter?.WriteLine(logMessage);
+                logWriter?.Flush();
+            };
+
+            log("Analysis engine starting.");
+            log($"Solution/Project: {options.InputSolution.FullName}");
+            log($"Analysis Mode: {options.Mode}");
+            log($"Recursion Depth: {options.Depth}");
+
+            var engine = new AnalysisEngine(options.InputSolution.FullName, log);
+            SymbolAnalysisResult? analysisResult;
+
+            if (!string.IsNullOrEmpty(options.TargetMethod))
+            {
+                log($"Starting analysis by SHORT NAME: '{options.TargetMethod}'");
+                analysisResult = await engine.AnalyzeByShortNameAsync(options.TargetMethod, options.Mode, options.Depth);
+            }
+            else
+            {
+                log($"Starting analysis by EXACT NAME: '{options.TargetSymbol}'");
+                analysisResult = await engine.AnalyzeByExactNameAsync(options.TargetSymbol!, options.Mode, options.Depth);
+            }
+            
+            if (analysisResult == null)
+            {
+                log($"Analysis could not be completed for the specified target. See previous errors.");
                 return 1;
             }
 
-            // Validate output directory
-            if (output == null)
-            {
-                output = new DirectoryInfo(Directory.GetCurrentDirectory());
-            }
-            if (!output.Exists)
-            {
-                output.Create();
-            }
-
-            // Determine base name for output files
-            string baseName = Path.GetFileNameWithoutExtension(input.Name);
-            string contextFileName = $"{baseName}_codecontext.txt";
-            string logFileName = $"{baseName}_analyzer.log";
-            string contextFilePath = Path.Combine(output.FullName, contextFileName);
-            string logFilePath = Path.Combine(output.FullName, logFileName);
-
-            // Open writers
-            logWriter = new StreamWriter(logFilePath, append: false);
-
-            // Select output file extension and writer
-            string outExt = outputFormat.ToLowerInvariant() switch
-            {
-                "json" => "json",
-                "md" => "md",
-                _ => "txt"
-            };
-            string outFileName = $"{baseName}_codecontext.{outExt}";
-            string outFilePath = Path.Combine(output.FullName, outFileName);
-            analysisWriter = new StreamWriter(outFilePath, append: false);
-
-            IContextWriter contextWriter = outputFormat.ToLowerInvariant() switch
-            {
-                "json" => new JsonContextWriter(analysisWriter),
-                "md" => new MdContextWriter(analysisWriter),
-                _ => new TxtContextWriter(analysisWriter)
-            };
-
-            // Helper log function
-            void Log(string message)
-            {
-                string timestamp = $"{DateTime.Now:yyyy-MM-dd HH:mm:ss}";
-                Console.WriteLine(message);
-                logWriter?.WriteLine($"{timestamp} {message}");
-                logWriter?.Flush();
-            }
-
-            Log("RoslynCodeAnalyzer started.");
-            Log($"Input: {input.FullName}");
-            Log($"Output directory: {output.FullName}");
-
-            Log("Loading workspace... This might take a moment.");
-            using var workspace = MSBuildWorkspace.Create();
-            workspace.LoadMetadataForReferencedProjects = true;
-
-            Solution solution;
-            if (input.Extension.Equals(".sln", StringComparison.OrdinalIgnoreCase))
-            {
-                solution = await workspace.OpenSolutionAsync(input.FullName);
-            }
-            else
-            {
-                solution = (await workspace.OpenProjectAsync(input.FullName)).Solution;
-            }
-
-            Log("Workspace loaded. Finding symbols and references...");
-
-            // --- Step 1: Discover all relevant symbols (classes, methods, etc.) ---
-            var symbolsToAnalyze = new List<ISymbol>();
-            foreach (var project in solution.Projects)
-            {
-                var compilation = await project.GetCompilationAsync();
-                if (compilation == null) continue;
-
-                foreach (var syntaxTree in compilation.SyntaxTrees)
-                {
-                    var semanticModel = compilation.GetSemanticModel(syntaxTree);
-                    var root = await syntaxTree.GetRootAsync();
-
-                    // Find all type (class, struct, interface) and method declarations
-                    var declarations = root.DescendantNodes()
-                        .OfType<BaseTypeDeclarationSyntax>()
-                        .Cast<SyntaxNode>()
-                        .Concat(root.DescendantNodes().OfType<MethodDeclarationSyntax>());
-
-foreach (var declaration in declarations)
-{
-    var declaredSymbol = semanticModel.GetDeclaredSymbol(declaration);
-    if (declaredSymbol != null)
-    {
-        symbolsToAnalyze.Add(declaredSymbol);
-    }
-}
-                }
-            }
-
-            symbolsToAnalyze = symbolsToAnalyze.Distinct(SymbolEqualityComparer.Default).ToList();
-
-            // Filter by symbol name/pattern if provided
-            if (!string.IsNullOrWhiteSpace(symbolPattern))
-            {
-                // Case-insensitive substring match
-                symbolsToAnalyze = symbolsToAnalyze
-                    .Where(s => s.Name != null && s.Name.IndexOf(symbolPattern, StringComparison.OrdinalIgnoreCase) >= 0)
-                    .ToList();
-                Log($"Filtered symbols by pattern '{symbolPattern}': {symbolsToAnalyze.Count} match(es) found.");
-            }
-            else
-            {
-                Log($"Found {symbolsToAnalyze.Count} total symbols to analyze.");
-            }
-            Log("");
-
-            // Expand symbols to include related symbols as per relationLevel
-            symbolsToAnalyze = await ExpandRelatedSymbolsAsync(symbolsToAnalyze, solution, relationLevel, Log);
-
-            // Prepare for relative path calculation
-            string solutionDir = input.DirectoryName ?? Directory.GetCurrentDirectory();
-
-            int symbolIndex = 1;
-            // --- Step 2: For each symbol, find its definition and references ---
-            foreach (var symbol in symbolsToAnalyze)
-            {
-                string symbolDisplayName = symbol.ToDisplayString();
-                string symbolKind = symbol.Kind.ToString();
-
-                // Log progress (log file only)
-                Log("=====================================================================");
-                Log($"ANALYZING SYMBOL {symbolIndex} of {symbolsToAnalyze.Count}: {symbolDisplayName}");
-                Log($"Kind: {symbolKind}");
-                Log("=====================================================================");
-
-                // --- Definition metadata ---
-                var definitionLocation = symbol.Locations.FirstOrDefault();
-                string defAbsFilePath = definitionLocation?.SourceTree?.FilePath ?? "";
-                string defRelFilePath = defAbsFilePath != "" ? GetRelativePath(defAbsFilePath, solutionDir) : "(unknown)";
-int defLineNumber = definitionLocation?.GetLineSpan().StartLinePosition.Line + 1 ?? -1;
-                string signature = symbol.ToDisplayString(SymbolDisplayFormat.MinimallyQualifiedFormat);
-
-                // --- Code snippet for symbol definition ---
-                string defSnippet = "";
-                if (snippetLevel != null && snippetLevel.ToLowerInvariant() != "none" && definitionLocation != null && definitionLocation.SourceTree != null)
-                {
-                    var tree = definitionLocation.SourceTree;
-                    var span = definitionLocation.SourceSpan;
-                    var text = tree.GetText();
-                    if (snippetLevel.ToLowerInvariant() == "line")
-                    {
-                        var line = text.Lines.GetLineFromPosition(span.Start);
-                        defSnippet = line.ToString();
-                    }
-                    else if (snippetLevel.ToLowerInvariant() == "block")
-                    {
-                        var root = await tree.GetRootAsync();
-                        var node = root.FindNode(span);
-                        defSnippet = node.ToFullString();
-                    }
-                }
-
-                await contextWriter.WriteSymbolAsync(
-                    symbol,
-                    symbolKind,
-                    defRelFilePath != "(unknown)" && defLineNumber > 0 ? $"{defRelFilePath}:{defLineNumber}" : defRelFilePath,
-                    signature,
-                    defSnippet
-                );
-
-                // --- References ---
-                var references = await SymbolFinder.FindReferencesAsync(symbol, solution);
-
-                int refCount = 0;
-                foreach (var referencedSymbol in references)
-                {
-                    foreach (var location in referencedSymbol.Locations)
-                    {
-                        var doc = location.Document;
-                        var loc = location.Location;
-                        var absRefFilePath = doc.FilePath;
-                        var relRefFilePath = absRefFilePath != null ? GetRelativePath(absRefFilePath, solutionDir) : "(unknown)";
-                        var refLineNumber = loc.GetLineSpan().StartLinePosition.Line + 1;
-
-                        // Code snippet for reference
-                        string refSnippet = "";
-                        if (snippetLevel != null && snippetLevel.ToLowerInvariant() != "none" && loc.SourceTree != null)
-                        {
-                            var tree = loc.SourceTree;
-                            var span = loc.SourceSpan;
-                            var text = tree.GetText();
-                            if (snippetLevel.ToLowerInvariant() == "line")
-                            {
-                                var line = text.Lines.GetLineFromPosition(span.Start);
-                                refSnippet = line.ToString();
-                            }
-                            else if (snippetLevel.ToLowerInvariant() == "block")
-                            {
-                                var root = await tree.GetRootAsync();
-                                var node = root.FindNode(span);
-                                refSnippet = node.ToFullString();
-                            }
-                        }
-
-                        await contextWriter.WriteReferenceAsync(relRefFilePath, refLineNumber, refSnippet);
-                        refCount++;
-                    }
-                }
-                if (refCount == 0)
-                {
-                    await contextWriter.WriteReferenceAsync("(No references found in the solution.)", -1, "");
-                }
-                await contextWriter.NextSymbolAsync();
-
-                symbolIndex++;
-            }
-
-            await contextWriter.CompleteAsync();
-
-            // Helper: Expand related symbols based on relationLevel
-            static async Task<List<ISymbol>> ExpandRelatedSymbolsAsync(List<ISymbol> inputSymbols, Solution solution, string relationLevel, Action<string> log)
-            {
-                var comparer = SymbolEqualityComparer.Default;
-                var result = new HashSet<ISymbol>(inputSymbols, comparer);
-
-                if (string.Equals(relationLevel, "direct", StringComparison.OrdinalIgnoreCase))
-                    return result.ToList();
-
-                // Add referenced and referencing symbols
-                if (string.Equals(relationLevel, "references", StringComparison.OrdinalIgnoreCase) ||
-                    string.Equals(relationLevel, "all", StringComparison.OrdinalIgnoreCase))
-                {
-                    var toAdd = new HashSet<ISymbol>(comparer);
-foreach (var inputSymbol in inputSymbols)
-{
-    // Referenced symbols (symbols this symbol uses)
-    if (inputSymbol is INamedTypeSymbol typeSymbol)
-    {
-        foreach (var member in typeSymbol.GetMembers())
-        {
-            if (member is IMethodSymbol || member is IPropertySymbol || member is IFieldSymbol)
-                toAdd.Add(member);
-        }
-        if (typeSymbol.BaseType != null)
-            toAdd.Add(typeSymbol.BaseType);
-        foreach (var iface in typeSymbol.AllInterfaces)
-            toAdd.Add(iface);
-    }
-    // Referencing symbols (symbols that use this symbol)
-    var references = await SymbolFinder.FindReferencesAsync(inputSymbol, solution);
-    foreach (var referencedSymbol in references)
-    {
-        foreach (var location in referencedSymbol.Locations)
-        {
-            var doc = location.Document;
-            var model = await doc.GetSemanticModelAsync();
-            if (model != null)
-            {
-                var node = await location.Location.SourceTree.GetRootAsync();
-                var refNode = node.FindNode(location.Location.SourceSpan);
-                var refSymbol = model.GetDeclaredSymbol(refNode);
-                if (refSymbol != null)
-                    toAdd.Add(refSymbol);
-            }
-        }
-    }
-}
-                    foreach (var s in toAdd)
-                        result.Add(s);
-                }
-
-                // Add inheritance relations
-                if (string.Equals(relationLevel, "inheritance", StringComparison.OrdinalIgnoreCase) ||
-                    string.Equals(relationLevel, "all", StringComparison.OrdinalIgnoreCase))
-                {
-                    var toAdd = new HashSet<ISymbol>(comparer);
-foreach (var inputSymbol in inputSymbols)
-{
-    if (inputSymbol is INamedTypeSymbol typeSymbol)
-    {
-        // Base type
-        if (typeSymbol.BaseType != null)
-            toAdd.Add(typeSymbol.BaseType);
-        // Derived types
-        var derived = await SymbolFinder.FindDerivedClassesAsync(typeSymbol, solution);
-        foreach (var d in derived)
-            toAdd.Add(d);
-        // Interfaces
-        foreach (var iface in typeSymbol.AllInterfaces)
-            toAdd.Add(iface);
-    }
-}
-                    foreach (var s in toAdd)
-                        result.Add(s);
-                }
-
-                log($"Expanded to {result.Count} symbols after applying relation level '{relationLevel}'.");
-                return result.ToList();
-            }
-
-            Log("Analysis complete.");
+            log("Top-level analysis complete. Writing output...");
+            await WriteOutput(options.Output, baseName, options.OutputFormat, analysisResult, log);
+            log("Process finished successfully.");
             return 0;
         }
         catch (Exception ex)
         {
-            string errorMsg = $"ERROR: {ex.Message}";
-            Console.Error.WriteLine(errorMsg);
-            logWriter?.WriteLine(errorMsg);
-            logWriter?.WriteLine(ex.StackTrace ?? "");
+            Console.Error.WriteLine($"FATAL ERROR: {ex.Message}");
+            logWriter?.WriteLine($"FATAL ERROR: {ex.ToString()}");
             return 2;
         }
         finally
         {
             logWriter?.Dispose();
-            analysisWriter?.Dispose();
         }
     }
-
-    // Returns the relative path from 'baseDir' to 'fullPath'
-    private static string GetRelativePath(string fullPath, string baseDir)
+    
+    private static async Task WriteOutput(DirectoryInfo outputDir, string baseName, string format, SymbolAnalysisResult result, Action<string> log)
     {
-        try
+        string ext = format.ToLowerInvariant();
+        string outFilePath = Path.Combine(outputDir.FullName, $"{baseName}_analysis.{ext}");
+        log($"Writing output to: {outFilePath}");
+
+        using var writer = new StreamWriter(outFilePath, false);
+        IOutputWriter outputWriter = ext switch
         {
-            var baseUri = new Uri(AppendDirectorySeparatorChar(baseDir));
-            var fileUri = new Uri(fullPath);
-            return Uri.UnescapeDataString(baseUri.MakeRelativeUri(fileUri).ToString().Replace('/', Path.DirectorySeparatorChar));
+            "md" => new MdOutputWriter(writer),
+            "txt" => new TxtOutputWriter(writer),
+            _ => new JsonOutputWriter(writer)
+        };
+        await outputWriter.WriteResultAsync(result);
+        log("Output writing complete.");
+    }
+    
+    private static string GetSlnOrCsprojPath()
+    {
+        var currentDir = new DirectoryInfo(Directory.GetCurrentDirectory());
+        while (currentDir != null)
+        {
+            var file = currentDir.GetFiles("*.sln").FirstOrDefault() ?? currentDir.GetFiles("*.csproj").FirstOrDefault();
+            if (file != null) return file.FullName;
+            currentDir = currentDir.Parent;
         }
-        catch
+        return string.Empty;
+    }
+
+    private class AnalysisOptions
+    {
+        public string? TargetSymbol { get; set; }
+        public string? TargetMethod { get; set; }
+        public AnalysisMode Mode { get; set; }
+        public int Depth { get; set; }
+        public DirectoryInfo Output { get; set; } = null!;
+        public string OutputFormat { get; set; } = "json";
+        public FileInfo InputSolution { get; set; } = null!;
+    }
+}
+
+public enum AnalysisMode { Full, References, Analyze }
+
+// =================================================================================
+// 2. CORE ANALYSIS ENGINE
+// =================================================================================
+
+public class AnalysisEngine
+{
+    private readonly string _solutionPath;
+    private readonly Action<string> _log;
+    private Solution _solution = null!;
+    private string _solutionDir = "";
+
+    public AnalysisEngine(string solutionPath, Action<string> logger)
+    {
+        _solutionPath = solutionPath;
+        _log = logger;
+    }
+    
+    private async Task LoadWorkspaceAsync()
+    {
+        if (_solution != null) return;
+        _log("TRACE: Loading workspace...");
+        using var workspace = MSBuildWorkspace.Create();
+        _solution = Path.GetExtension(_solutionPath).Equals(".sln", StringComparison.OrdinalIgnoreCase)
+            ? await workspace.OpenSolutionAsync(_solutionPath)
+            : (await workspace.OpenProjectAsync(_solutionPath)).Solution;
+        _solutionDir = Path.GetDirectoryName(_solutionPath)!;
+        _log("TRACE: Workspace loaded successfully.");
+    }
+
+    public async Task<SymbolAnalysisResult?> AnalyzeByShortNameAsync(string shortName, AnalysisMode mode, int maxDepth)
+    {
+        await LoadWorkspaceAsync();
+        _log($"TRACE: Searching for all methods with short name '{shortName}'...");
+        var candidateSymbols = await FindSymbolsByShortNameAsync(shortName);
+        _log($"TRACE: Found {candidateSymbols.Count} candidate(s).");
+
+        if (!candidateSymbols.Any())
         {
-            // Fallback to absolute path if any error
-            return fullPath;
+            _log($"ERROR: No method with the short name '{shortName}' could be found in the solution.");
+            return null;
         }
-    }
 
-    private static string AppendDirectorySeparatorChar(string path)
-    {
-        if (!path.EndsWith(Path.DirectorySeparatorChar.ToString()))
-            return path + Path.DirectorySeparatorChar;
-        return path;
-    }
-
-    // --- Output Writers Abstraction ---
-
-    public interface IContextWriter : IDisposable
-    {
-        Task WriteSymbolAsync(ISymbol symbol, string kind, string definition, string signature, string codeSnippet);
-        Task WriteReferenceAsync(string refPath, int refLine, string codeSnippet);
-        Task NextSymbolAsync();
-        Task CompleteAsync();
-    }
-
-    public class TxtContextWriter : IContextWriter
-    {
-        private readonly StreamWriter _writer;
-        public TxtContextWriter(StreamWriter writer) { _writer = writer; }
-        public Task WriteSymbolAsync(ISymbol symbol, string kind, string definition, string signature, string codeSnippet)
+        ISymbol targetSymbol;
+        if (candidateSymbols.Count == 1)
         {
-            _writer.WriteLine($"SYMBOL: {symbol.ToDisplayString()}");
-            _writer.WriteLine($"Kind: {kind}");
-            _writer.WriteLine($"Definition: {definition}");
-            _writer.WriteLine($"Signature: {signature}");
-            if (!string.IsNullOrEmpty(codeSnippet))
+            targetSymbol = candidateSymbols[0];
+            _log($"TRACE: Found unique match. Proceeding with analysis for: {targetSymbol.ToDisplayString()}");
+        }
+        else
+        {
+            if (!Environment.UserInteractive)
             {
-                _writer.WriteLine("Code Snippet:");
-                _writer.WriteLine("--------------------------------------------------");
-                _writer.WriteLine(codeSnippet);
-                _writer.WriteLine("--------------------------------------------------");
+                _log($"ERROR: Ambiguous method name '{shortName}' found in a non-interactive environment.");
+                _log("Please use the --target-symbol option with one of the following exact names:");
+                candidateSymbols.ForEach(s => _log($"- {s.ToDisplayString()}"));
+                return null;
             }
-            return Task.CompletedTask;
+            targetSymbol = PromptForSymbolSelection(candidateSymbols);
+            _log($"TRACE: User selected: {targetSymbol.ToDisplayString()}");
         }
-        public Task WriteReferenceAsync(string refPath, int refLine, string codeSnippet)
-        {
-            _writer.WriteLine($"  - {refPath}:{refLine}");
-            if (!string.IsNullOrEmpty(codeSnippet))
-            {
-                _writer.WriteLine("    Code Snippet:");
-                _writer.WriteLine("    --------------------------------------------------");
-                foreach (var line in codeSnippet.Split('\n'))
-                    _writer.WriteLine("    " + line.TrimEnd('\r'));
-                _writer.WriteLine("    --------------------------------------------------");
-            }
-            return Task.CompletedTask;
-        }
-        public Task NextSymbolAsync()
-        {
-            _writer.WriteLine();
-            return Task.CompletedTask;
-        }
-        public Task CompleteAsync() => Task.CompletedTask;
-        public void Dispose() => _writer.Dispose();
+        
+        return await AnalyzeSymbolRecursivelyAsync(targetSymbol, mode, 0, maxDepth, new HashSet<ISymbol>(SymbolEqualityComparer.Default));
     }
 
-    public class JsonContextWriter : IContextWriter
+    public async Task<SymbolAnalysisResult?> AnalyzeByExactNameAsync(string exactName, AnalysisMode mode, int maxDepth)
     {
-        private readonly StreamWriter _writer;
-        private readonly List<object> _symbols = new();
-        private object? _currentSymbol;
-        private List<object>? _currentReferences;
-        public JsonContextWriter(StreamWriter writer) { _writer = writer; }
-        public Task WriteSymbolAsync(ISymbol symbol, string kind, string definition, string signature, string codeSnippet)
+        await LoadWorkspaceAsync();
+        _log($"TRACE: Searching for symbol with exact name '{exactName}'...");
+        var symbol = await FindSymbolByExactNameAsync(exactName);
+        if (symbol == null)
         {
-            _currentReferences = new List<object>();
-            _currentSymbol = new Dictionary<string, object?>
-            {
-                ["symbol"] = symbol.ToDisplayString(),
-                ["kind"] = kind,
-                ["definition"] = definition,
-                ["signature"] = signature,
-                ["codeSnippet"] = string.IsNullOrEmpty(codeSnippet) ? null : codeSnippet,
-                ["references"] = _currentReferences
-            };
-            _symbols.Add(_currentSymbol);
-            return Task.CompletedTask;
+             _log($"ERROR: Could not find a symbol with the exact name '{exactName}'.");
+            return null;
         }
-        public Task WriteReferenceAsync(string refPath, int refLine, string codeSnippet)
-        {
-            _currentReferences?.Add(new Dictionary<string, object?>
-            {
-                ["path"] = refPath,
-                ["line"] = refLine,
-                ["codeSnippet"] = string.IsNullOrEmpty(codeSnippet) ? null : codeSnippet
-            });
-            return Task.CompletedTask;
-        }
-        public Task NextSymbolAsync() => Task.CompletedTask;
-        public Task CompleteAsync()
-        {
-            var json = System.Text.Json.JsonSerializer.Serialize(_symbols, new System.Text.Json.JsonSerializerOptions { WriteIndented = true });
-            _writer.WriteLine(json);
-            return Task.CompletedTask;
-        }
-        public void Dispose() => _writer.Dispose();
+        _log($"TRACE: Found exact match. Proceeding with analysis for: {symbol.ToDisplayString()}");
+        return await AnalyzeSymbolRecursivelyAsync(symbol, mode, 0, maxDepth, new HashSet<ISymbol>(SymbolEqualityComparer.Default));
     }
 
-    public class MdContextWriter : IContextWriter
+    private ISymbol PromptForSymbolSelection(List<ISymbol> symbols)
     {
-        private readonly StreamWriter _writer;
-        public MdContextWriter(StreamWriter writer) { _writer = writer; }
-        public Task WriteSymbolAsync(ISymbol symbol, string kind, string definition, string signature, string codeSnippet)
+        _log("ACTION: Ambiguous method name found. Prompting user for selection.");
+        Console.ForegroundColor = ConsoleColor.Yellow;
+        Console.WriteLine("\nAmbiguous method name found. Please choose the correct one:");
+        for (int i = 0; i < symbols.Count; i++)
         {
-            _writer.WriteLine($"## {symbol.ToDisplayString()}");
-            _writer.WriteLine($"**Kind:** {kind}  ");
-            _writer.WriteLine($"**Definition:** {definition}  ");
-            _writer.WriteLine($"**Signature:** `{signature}`  ");
-            if (!string.IsNullOrEmpty(codeSnippet))
-            {
-                _writer.WriteLine();
-                _writer.WriteLine("```csharp");
-                _writer.WriteLine(codeSnippet);
-                _writer.WriteLine("```");
-            }
-            _writer.WriteLine();
-            _writer.WriteLine("**References:**");
-            return Task.CompletedTask;
+            Console.WriteLine($"  [{i + 1}] {symbols[i].ToDisplayString()}");
         }
-        public Task WriteReferenceAsync(string refPath, int refLine, string codeSnippet)
+        Console.ResetColor();
+
+        while (true)
         {
-            _writer.Write($"- `{refPath}:{refLine}`");
-            if (!string.IsNullOrEmpty(codeSnippet))
+            Console.Write("Enter number and press ENTER: ");
+            string? input = Console.ReadLine();
+            if (int.TryParse(input, out int choice) && choice > 0 && choice <= symbols.Count)
             {
-                _writer.WriteLine();
-                _writer.WriteLine("  ```csharp");
-                _writer.WriteLine(codeSnippet);
-                _writer.WriteLine("  ```");
+                return symbols[choice - 1];
             }
-            else
-            {
-                _writer.WriteLine();
-            }
-            return Task.CompletedTask;
+            Console.ForegroundColor = ConsoleColor.Red;
+            Console.WriteLine("Invalid selection. Please try again.");
+            Console.ResetColor();
         }
-        public Task NextSymbolAsync()
+    }
+    
+    private async Task<SymbolAnalysisResult?> AnalyzeSymbolRecursivelyAsync(ISymbol symbol, AnalysisMode mode, int currentDepth, int maxDepth, HashSet<ISymbol> visited)
+    {
+        if (currentDepth > maxDepth)
         {
-            _writer.WriteLine();
-            return Task.CompletedTask;
+            _log($"TRACE: Reached max depth ({maxDepth}). Stopping recursion at '{symbol.ToDisplayString()}'.");
+            return null;
         }
-        public Task CompleteAsync() => Task.CompletedTask;
-        public void Dispose() => _writer.Dispose();
+        
+        if (!visited.Add(symbol))
+        {
+            _log($"TRACE: Already visited '{symbol.ToDisplayString()}'. Skipping to prevent infinite recursion.");
+            return null;
+        }
+
+        var location = symbol.Locations.FirstOrDefault();
+        var result = new SymbolAnalysisResult
+        {
+            SymbolName = symbol.ToDisplayString(),
+            SymbolKind = symbol.Kind.ToString(),
+            DefinitionLocation = GetRelativePath(location?.SourceTree?.FilePath, location?.GetLineSpan().StartLinePosition.Line + 1)
+        };
+
+        _log($"-- Analyzing '{result.SymbolName}' at depth {currentDepth} --");
+
+        // Outward Analysis
+        if (mode is AnalysisMode.Full or AnalysisMode.References)
+        {
+            _log($"TRACE: Finding references for '{result.SymbolName}'...");
+            var references = await SymbolFinder.FindReferencesAsync(symbol, _solution);
+            foreach (var refSymbol in references)
+                foreach (var loc in refSymbol.Locations)
+                    result.References.Add(new ReferenceInfo { FilePath = GetRelativePath(loc.Document.FilePath, loc.Location.GetLineSpan().StartLinePosition.Line + 1) });
+        }
+        
+        // Inward Analysis
+        IEnumerable<ISymbol> calledMethodSymbols = Enumerable.Empty<ISymbol>();
+        if (symbol is IMethodSymbol && mode is AnalysisMode.Full or AnalysisMode.Analyze)
+        {
+            _log($"TRACE: Performing inward analysis for '{result.SymbolName}'...");
+            if (location != null && location.IsInSource)
+            {
+                var document = _solution.GetDocument(location.SourceTree);
+                var methodDeclaration = (await location.SourceTree.GetRootAsync()).FindNode(location.SourceSpan) as MethodDeclarationSyntax;
+                if (document != null && methodDeclaration != null)
+                {
+                    var semanticModel = await document.GetSemanticModelAsync();
+                    if (semanticModel != null)
+                    {
+                        var walker = new PerformanceSyntaxWalker(semanticModel);
+                        walker.Visit(methodDeclaration.Body ?? (SyntaxNode?)methodDeclaration.ExpressionBody);
+                        result.InternalAnalysis = walker.GetResult();
+                        calledMethodSymbols = walker.CalledMethodSymbols;
+                        _log($"TRACE: Inward analysis found {calledMethodSymbols.Count()} method calls to trace.");
+                    }
+                }
+            } else {
+                _log($"TRACE: Skipping inward analysis for '{result.SymbolName}' because it has no source location.");
+            }
+        }
+
+        // Recursive Step
+        _log($"TRACE: Checking for sub-methods to analyze from '{result.SymbolName}'...");
+        foreach (var calledSymbol in calledMethodSymbols)
+        {
+            var childResult = await AnalyzeSymbolRecursivelyAsync(calledSymbol, mode, currentDepth + 1, maxDepth, visited);
+            if (childResult != null) result.CalledSymbols.Add(childResult);
+        }
+        
+        return result;
+    }
+
+    private async Task<List<ISymbol>> FindSymbolsByShortNameAsync(string shortName)
+    {
+        var symbols = new List<ISymbol>();
+        foreach (var project in _solution.Projects)
+        {
+            var compilation = await project.GetCompilationAsync();
+            if (compilation == null) continue;
+
+            foreach (var tree in compilation.SyntaxTrees)
+            {
+                var model = compilation.GetSemanticModel(tree);
+                var methods = (await tree.GetRootAsync()).DescendantNodes().OfType<MethodDeclarationSyntax>()
+                    .Where(m => m.Identifier.ValueText.Equals(shortName, StringComparison.Ordinal));
+                
+                foreach (var method in methods)
+                {
+                    var symbol = model.GetDeclaredSymbol(method);
+                    if (symbol != null) symbols.Add(symbol);
+                }
+            }
+        }
+        return symbols.Distinct(SymbolEqualityComparer.Default).ToList();
+    }
+
+    private async Task<ISymbol?> FindSymbolByExactNameAsync(string fullyQualifiedName)
+    {
+        foreach (var project in _solution.Projects)
+        {
+            var compilation = await project.GetCompilationAsync();
+            if (compilation == null) continue;
+            var symbols = SymbolFinder.FindDeclarationsAsync(project, fullyQualifiedName, false, SymbolFilter.All).Result;
+            var symbol = symbols.FirstOrDefault(s => s.ToDisplayString().Equals(fullyQualifiedName, StringComparison.Ordinal));
+            if (symbol != null) return symbol;
+        }
+        return null;
+    }
+
+    private string GetRelativePath(string? fullPath, int? line)
+    {
+        if (string.IsNullOrEmpty(fullPath)) return "Unknown location (likely from a compiled assembly)";
+        string relativePath = fullPath.StartsWith(_solutionDir) ? Path.GetRelativePath(_solutionDir, fullPath) : fullPath;
+        return line.HasValue ? $"{relativePath}:{line.Value}" : relativePath;
+    }
+}
+
+
+// =================================================================================
+// 3. DATA MODELS FOR HIERARCHICAL OUTPUT
+// =================================================================================
+public class SymbolAnalysisResult
+{
+    public string SymbolName { get; set; } = "";
+    public string SymbolKind { get; set; } = "";
+    public string DefinitionLocation { get; set; } = "";
+    
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public List<ReferenceInfo> References { get; set; } = new();
+
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public InternalAnalysisResult? InternalAnalysis { get; set; }
+
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public List<SymbolAnalysisResult> CalledSymbols { get; set; } = new();
+}
+
+public class ReferenceInfo
+{
+    public string FilePath { get; set; } = "";
+}
+
+public class InternalAnalysisResult
+{
+    public MethodMetrics Metrics { get; set; } = new();
+    public List<DataAccessCall> DataAccessCalls { get; set; } = new();
+    public List<LoopInfo> Loops { get; set; } = new();
+    public List<CodeSmell> CodeSmells { get; set; } = new();
+}
+
+public class MethodMetrics
+{
+    public int LinesOfCode { get; set; }
+    public int CyclomaticComplexity { get; set; }
+    public int ParameterCount { get; set; }
+}
+
+public class DataAccessCall
+{
+    public string AccessType { get; set; } = "Unknown";
+    public string Statement { get; set; } = "";
+    public int LineNumber { get; set; }
+    public bool IsInsideLoop { get; set; }
+}
+
+public class LoopInfo
+{
+    public string LoopType { get; set; } = "";
+    public int NestingLevel { get; set; }
+    public int LineNumber { get; set; }
+}
+
+public class CodeSmell
+{
+    public string SmellType { get; set; } = "";
+    public string Description { get; set; } = "";
+    public int LineNumber { get; set; }
+}
+
+
+// =================================================================================
+// 4. PERFORMANCE SYNTAX WALKER (INWARD ANALYSIS)
+// =================================================================================
+public class PerformanceSyntaxWalker : CSharpSyntaxWalker
+{
+    private readonly SemanticModel _semanticModel;
+    private int _loopNestingLevel = 0;
+    private readonly InternalAnalysisResult _result = new();
+    public List<ISymbol> CalledMethodSymbols { get; } = new();
+    
+    private static readonly HashSet<string> DataAccessKeywords = new(StringComparer.OrdinalIgnoreCase)
+    { "SqlCommand", "SqlConnection", "ExecuteReader", "ExecuteNonQuery", "SqlDataAdapter", "DbContext", "SaveChanges", "FromSqlRaw", "DataTable", "DataSet", "Select" };
+
+    public PerformanceSyntaxWalker(SemanticModel semanticModel) : base(SyntaxWalkerDepth.Node)
+    {
+        _semanticModel = semanticModel;
+        _result.Metrics.CyclomaticComplexity = 1; // Start with 1 for the method itself
+    }
+    
+    public InternalAnalysisResult GetResult() => _result;
+
+    public override void VisitMethodDeclaration(MethodDeclarationSyntax node)
+    {
+        var span = node.GetLocation().GetLineSpan();
+        _result.Metrics.LinesOfCode = span.EndLinePosition.Line - span.StartLinePosition.Line + 1;
+        _result.Metrics.ParameterCount = node.ParameterList.Parameters.Count;
+        base.VisitMethodDeclaration(node);
+    }
+    
+    public override void VisitInvocationExpression(InvocationExpressionSyntax node)
+    {
+        var symbolInfo = _semanticModel.GetSymbolInfo(node);
+        if (symbolInfo.Symbol is IMethodSymbol methodSymbol)
+        {
+            CalledMethodSymbols.Add(methodSymbol);
+            var line = node.GetLocation().GetLineSpan().StartLinePosition.Line + 1;
+            
+            if (DataAccessKeywords.Any(k => methodSymbol.ToDisplayString().Contains(k)))
+            {
+                 _result.DataAccessCalls.Add(new DataAccessCall { AccessType = "ADO/EF", Statement = node.Expression.ToString(), LineNumber = line, IsInsideLoop = _loopNestingLevel > 0 });
+            }
+        }
+        base.VisitInvocationExpression(node);
+    }
+    
+    public override void VisitObjectCreationExpression(ObjectCreationExpressionSyntax node)
+    {
+        if (_semanticModel.GetTypeInfo(node).Type?.Name.Contains("DataTable") == true)
+        {
+             _result.CodeSmells.Add(new CodeSmell { SmellType = "DataTable Usage", Description = $"Instantiation of DataTable.", LineNumber = node.GetLocation().GetLineSpan().StartLinePosition.Line + 1 });
+        }
+        base.VisitObjectCreationExpression(node);
+    }
+
+    public override void VisitForStatement(ForStatementSyntax node) { HandleLoop(node, "for", () => base.VisitForStatement(node)); }
+    public override void VisitForEachStatement(ForEachStatementSyntax node) { HandleLoop(node, "foreach", () => base.VisitForEachStatement(node)); }
+    public override void VisitWhileStatement(WhileStatementSyntax node) { HandleLoop(node, "while", () => base.VisitWhileStatement(node)); }
+
+    private void HandleLoop(SyntaxNode node, string type, Action visitBase)
+    {
+        _result.Metrics.CyclomaticComplexity++;
+        _loopNestingLevel++;
+        _result.Loops.Add(new LoopInfo { LoopType = type, NestingLevel = _loopNestingLevel, LineNumber = node.GetLocation().GetLineSpan().StartLinePosition.Line + 1 });
+        visitBase();
+        _loopNestingLevel--;
+    }
+
+    public override void VisitIfStatement(IfStatementSyntax node) { _result.Metrics.CyclomaticComplexity++; base.VisitIfStatement(node); }
+    public override void VisitConditionalExpression(ConditionalExpressionSyntax node) { _result.Metrics.CyclomaticComplexity++; base.VisitConditionalExpression(node); }
+    public override void VisitSwitchSection(SwitchSectionSyntax node) { if (node.Labels.Any(l => l.Kind() == SyntaxKind.CaseSwitchLabel)) { _result.Metrics.CyclomaticComplexity++; } base.VisitSwitchSection(node); }
+    public override void VisitBinaryExpression(BinaryExpressionSyntax node) { if (node.IsKind(SyntaxKind.LogicalAndExpression) || node.IsKind(SyntaxKind.LogicalOrExpression)) { _result.Metrics.CyclomaticComplexity++; } base.VisitBinaryExpression(node); }
+}
+
+// =================================================================================
+// 5. OUTPUT WRITERS
+// =================================================================================
+
+public interface IOutputWriter
+{
+    Task WriteResultAsync(SymbolAnalysisResult result);
+}
+
+public class JsonOutputWriter : IOutputWriter
+{
+    private readonly StreamWriter _writer;
+    public JsonOutputWriter(StreamWriter writer) => _writer = writer;
+    public async Task WriteResultAsync(SymbolAnalysisResult result)
+    {
+        var options = new JsonSerializerOptions { WriteIndented = true, DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingDefault };
+        var json = JsonSerializer.Serialize(result, options);
+        await _writer.WriteLineAsync(json);
+    }
+}
+
+public abstract class HierarchicalTextOutputWriter : IOutputWriter
+{
+    protected readonly StreamWriter _writer;
+    protected HierarchicalTextOutputWriter(StreamWriter writer) => _writer = writer;
+    public abstract Task WriteResultAsync(SymbolAnalysisResult result);
+    protected abstract void WriteNode(SymbolAnalysisResult node, string indent);
+}
+
+public class TxtOutputWriter : HierarchicalTextOutputWriter
+{
+    public TxtOutputWriter(StreamWriter writer) : base(writer) { }
+    public override Task WriteResultAsync(SymbolAnalysisResult result)
+    {
+        WriteNode(result, "");
+        return Task.CompletedTask;
+    }
+
+    protected override void WriteNode(SymbolAnalysisResult node, string indent)
+    {
+        _writer.WriteLine($"{indent}SYMBOL: {node.SymbolName} ({node.SymbolKind})");
+        _writer.WriteLine($"{indent}  Defined At: {node.DefinitionLocation}");
+
+        if (node.References.Any())
+        {
+            _writer.WriteLine($"{indent}  References ({node.References.Count}):");
+            node.References.Take(5).ToList().ForEach(r => _writer.WriteLine($"{indent}    - {r.FilePath}"));
+            if (node.References.Count > 5) _writer.WriteLine($"{indent}    ...and {node.References.Count - 5} more.");
+        }
+        
+        if (node.InternalAnalysis != null)
+        {
+            var analysis = node.InternalAnalysis;
+            _writer.WriteLine($"{indent}  Internal Analysis:");
+            _writer.WriteLine($"{indent}    Metrics: LOC={analysis.Metrics.LinesOfCode}, Complexity={analysis.Metrics.CyclomaticComplexity}");
+            analysis.Loops.ForEach(l => _writer.WriteLine($"{indent}    Loop: {l.LoopType} (depth {l.NestingLevel}) at line {l.LineNumber}"));
+            analysis.DataAccessCalls.ForEach(d => _writer.WriteLine($"{indent}    DB Call: {d.Statement} at line {d.LineNumber} {(d.IsInsideLoop ? "[IN LOOP]" : "")}"));
+            analysis.CodeSmells.ForEach(s => _writer.WriteLine($"{indent}    Smell: {s.SmellType} at line {s.LineNumber}"));
+        }
+
+        if (node.CalledSymbols.Any())
+        {
+            _writer.WriteLine($"{indent}  Calls To:");
+            foreach (var child in node.CalledSymbols)
+            {
+                WriteNode(child, indent + "    ");
+            }
+        }
+        _writer.WriteLine();
+    }
+}
+
+public class MdOutputWriter : HierarchicalTextOutputWriter
+{
+    public MdOutputWriter(StreamWriter writer) : base(writer) { }
+    public override async Task WriteResultAsync(SymbolAnalysisResult result)
+    {
+        await _writer.WriteLineAsync("# Code Analysis Report");
+        WriteNode(result, "");
+    }
+
+    protected override void WriteNode(SymbolAnalysisResult node, string indent)
+    {
+        string header = new string('#', indent.Length / 2 + 2);
+        _writer.WriteLine($"\n{header} {node.SymbolKind}: `{node.SymbolName}`");
+        _writer.WriteLine($"- **Defined At:** `{node.DefinitionLocation}`");
+
+        if (node.References.Any())
+        {
+            _writer.WriteLine("- **References:**");
+            foreach (var r in node.References) _writer.WriteLine($"  - `{r.FilePath}`");
+        }
+        
+        if (node.InternalAnalysis != null)
+        {
+            var analysis = node.InternalAnalysis;
+            _writer.WriteLine("- **Internal Analysis:**");
+            _writer.WriteLine($"  - **Metrics:** LinesOfCode=`{analysis.Metrics.LinesOfCode}`, CyclomaticComplexity=`{analysis.Metrics.CyclomaticComplexity}`");
+            foreach (var d in analysis.DataAccessCalls) _writer.WriteLine($"  - **DB Call:** `{d.Statement}` at line {d.LineNumber} {(d.IsInsideLoop ? "**(IN LOOP)**" : "")}");
+            foreach (var l in analysis.Loops) _writer.WriteLine($"  - **Loop:** A `{l.LoopType}` loop with nesting level `{l.NestingLevel}` at line {l.LineNumber}");
+        }
+
+        if (node.CalledSymbols.Any())
+        {
+            _writer.WriteLine("- **Calls To:**");
+            // Markdown doesn't have arbitrary indent, but we can use nested blockquotes
+            // For simplicity, we just increase the header level
+            foreach (var child in node.CalledSymbols)
+            {
+                WriteNode(child, indent + "  ");
+            }
+        }
     }
 }

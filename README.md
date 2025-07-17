@@ -1,35 +1,22 @@
 # RoslynCodeAnalyzer
 
-**RoslynCodeAnalyzer** is a C# console tool designed to empower AI coding agents and developers with deep, configurable analysis of large .NET solutions and projects. Leveraging the Roslyn compiler platform, it outputs a comprehensive code context file—detailing symbol definitions, references, and code snippets—alongside a detailed operational log. The tool is highly configurable, allowing users (or AI agents) to filter by symbol, control the depth of relationship analysis, and select the desired output format (plain text, JSON, or Markdown).
-
-**Key strengths for AI agent integration:**
-- **Machine-Readable Output:** Produces structured JSON or Markdown files, making it easy for AI agents to parse and understand symbol relationships, references, and code locations.
-- **Configurable Granularity:** Agents can tailor the analysis to focus on specific symbols, relationship types (direct, references, inheritance, all), and snippet detail (none, line, block), ensuring only the most relevant context is extracted for code navigation, refactoring, or automated actions.
-- **Separation of Concerns:** Outputs analysis results and operational logs to separate files, simplifying downstream processing and error handling for agents.
-- **Relative Paths:** All file paths in the output are relative to the solution/project, supporting portability and easier mapping in large codebases.
-- **Robust CLI:** Modern command-line interface with clear help, error handling, and extensibility for future enhancements.
-
-**How AI agents use RoslynCodeAnalyzer:**
-1. **Invoke via Shell:** The agent runs RoslynCodeAnalyzer with desired options (e.g., filter by symbol, set output format to JSON).
-2. **Parse Output:** The agent reads the generated code context file to extract symbol definitions, references, and code snippets.
-3. **Automate Actions:** Using this context, the agent can perform advanced code navigation, suggest or apply refactorings, and provide context-aware code completions or explanations—even in very large C# codebases.
-
-**Best for:**
-- AI agents (like Cline, Cursor, Claude Code, Gemini CLI) that need precise, scalable, and customizable code analysis for large C# projects.
-- Scenarios where understanding symbol relationships, references, and code structure is critical for automation or advanced code assistance.
-
-A C# console tool for analyzing .NET solutions and projects using Roslyn. Outputs a code context file (symbol definitions and references, with configurable detail and format) and a detailed log file.
+**RoslynCodeAnalyzer** is a C# console tool for deep, configurable static analysis of .NET solutions and projects. Leveraging the Roslyn compiler platform, it outputs a comprehensive, hierarchical code analysis—detailing symbol definitions, references, call chains, and code metrics—alongside a detailed operational log. The tool is designed for both developers and AI coding agents, supporting advanced code navigation, refactoring, and context extraction in large C# codebases.
 
 ---
 
 ## Features
 
-- **Modern CLI**: Supports `--help`, `--input`/`-i`, `--output`/`-o`, `--symbol`/`-s`, `--relation-level`/`-r`, `--snippet-level`/`-n`, `--output-format`/`-f`.
-- **Configurable Analysis**: Filter by symbol, control relationship and snippet detail, and choose output format.
-- **Separation of Concerns**: Analysis output (context) and operational log are written to separate files.
-- **Relative Paths**: All file paths in the analysis output are relative to the solution/project location.
-- **Robustness**: Clear error handling, exit codes, and user-friendly messages.
-- **Extensible**: Easily adaptable for future enhancements.
+- **Modern CLI**: Analyze by exact symbol name or method short name with options for analysis mode, recursion depth, output directory, and format.
+- **No Input Required**: Automatically detects the nearest `.sln` or `.csproj` file in the current or parent directories.
+- **Configurable Analysis**:
+  - Analyze by exact symbol (`--target-symbol`) or by method name (`--method`).
+  - Select analysis mode: `Full`, `References`, or `Analyze`.
+  - Control recursion depth for call chain exploration.
+- **Multiple Output Formats**: JSON, Markdown, or plain text.
+- **Separation of Concerns**: Analysis results and operational logs are written to separate files.
+- **Relative Paths**: All file paths in the output are relative to the solution/project location.
+- **Robust Error Handling**: Clear error messages, exit codes, and user-friendly CLI validation.
+- **AI Agent Ready**: Output is machine-readable and suitable for integration with AI coding agents.
 
 ---
 
@@ -38,50 +25,51 @@ A C# console tool for analyzing .NET solutions and projects using Roslyn. Output
 ### Command Line
 
 ```sh
-RoslynCodeAnalyzer --input <path-to-solution.sln|project.csproj> [options]
-RoslynCodeAnalyzer -i <path-to-solution.sln> -o <output-directory> -s <symbol-pattern> -r <relation-level> -n <snippet-level> -f <output-format>
+RoslynCodeAnalyzer --target-symbol <exact-symbol-name> [options]
+RoslynCodeAnalyzer --method <short-method-name> [options]
+RoslynCodeAnalyzer -s <exact-symbol-name> -a Full -d 2 -o ./analysis -f json
+RoslynCodeAnalyzer -m MyMethod -a Analyze -f md
 RoslynCodeAnalyzer --help
 ```
 
+**Note:** You must provide either `--target-symbol` or `--method`, but not both.
+
+### Notes
+
+- **Run Location**: The tool must be run from a directory within or above the target solution/project, as it searches upward for the nearest `.sln` or `.csproj` file.
+- **Ambiguous Method Names**: If using `--method` and multiple matches are found, you will be prompted to select only in interactive mode. In non-interactive environments (e.g., CI), ambiguity will result in an error.
+
 ### Options
 
-| Option                | Alias | Description                                                                 | Required | Default                |
-|-----------------------|-------|-----------------------------------------------------------------------------|----------|------------------------|
-| --input               | -i    | Path to the .sln or .csproj file to analyze                                 | Yes      | -                      |
-| --output              | -o    | Directory to write output files                                             | No       | Current directory      |
-| --symbol              | -s    | Symbol name or pattern to filter (case-insensitive substring match)         | No       | (all symbols)          |
-| --relation-level      | -r    | Relation level: direct, references, inheritance, all                        | No       | direct                 |
-| --snippet-level       | -n    | Snippet level: none, line, block                                            | No       | none                   |
-| --output-format       | -f    | Output format: txt, json, md                                                | No       | txt                    |
-| --help                | -h/?  | Show help and usage information                                             | No       | -                      |
-| --version             |       | Show version information                                                    | No       | -                      |
+| Option                | Alias | Description                                                                                      | Required | Default                      |
+|-----------------------|-------|--------------------------------------------------------------------------------------------------|----------|------------------------------|
+| --target-symbol       | -s    | Analyze a specific symbol using its full, exact name (e.g., `MyNamespace.MyClass.MyMethod(...)`) | One of   | -                            |
+| --method              | -m    | Analyze a method by its short name (e.g., `MyMethod`). Prompts if ambiguous.                     | One of   | -                            |
+| --analysis-mode       | -a    | Analysis mode: `Full`, `References`, or `Analyze`                                                | No       | Full                         |
+| --depth               | -d    | Recursion depth for call chain analysis                                                          | No       | 0 (no recursion)             |
+| --output              | -o    | Directory to write output files                                                                  | No       | Current directory            |
+| --output-format       | -f    | Output format: `json`, `md`, `txt`                                                               | No       | json                         |
+| --help                |       | Show help and usage information                                                                  | No       | -                            |
 
 #### Option Details
 
-- **--symbol / -s**: Only analyze symbols whose name contains the given pattern.
-- **--relation-level / -r**:
-  - `direct`: Only direct relationships (default).
-  - `references`: Includes referenced and referencing symbols.
-  - `inheritance`: Includes base/derived/interface relations.
-  - `all`: Combines all above.
-- **--snippet-level / -n**:
-  - `none`: No code snippets (default).
-  - `line`: Single line of code for each result.
-  - `block`: Full code block for each result.
-- **--output-format / -f**:
-  - `txt`: Plain text (default).
-  - `json`: Structured JSON.
-  - `md`: Markdown.
+- **--target-symbol / -s**: Analyze a symbol by its fully qualified name (best for scripts and automation).
+- **--method / -m**: Analyze by method short name. If ambiguous, prompts for selection (interactive mode only).
+- **--analysis-mode / -a**:
+  - `Full`: Analyze both references and inward calls (default).
+  - `References`: Only find references to the symbol.
+  - `Analyze`: Only analyze inward calls and metrics.
+- **--depth / -d**: Maximum recursion depth for call chain analysis (0 = only the target symbol).
+- **--output / -o**: Directory to write output files (created if it doesn't exist).
+- **--output-format / -f**: Output format for the analysis file: `json`, `md`, or `txt`.
 
 ---
 
 ## Output Files
 
-- **Code Context File**: `<SolutionName>_codecontext.txt|json|md`
-  - Contains symbol definitions and references, with detail and format controlled by CLI options.
-  - All file paths are relative to the solution/project file.
-  - Format and content depend on `--output-format` and `--snippet-level`.
-
+- **Analysis File**: `<SolutionName>_analysis.json|md|txt`
+  - Contains hierarchical analysis of the target symbol, including references, call chains, metrics, and code smells.
+  - Format and content depend on `--output-format`.
 - **Log File**: `<SolutionName>_analyzer.log`
   - Contains operational logs, progress, errors, and timestamps.
 
@@ -92,117 +80,92 @@ Both files are written to the specified output directory (or current directory b
 ## Examples
 
 ```sh
-# Basic usage (default output format and detail)
-RoslynCodeAnalyzer --input MySolution.sln
+# Analyze a method by its exact symbol name, output as JSON
+RoslynCodeAnalyzer --target-symbol MyNamespace.MyClass.MyMethod(System.String) -f json
 
-# Specify output directory and filter by symbol
-RoslynCodeAnalyzer -i MySolution.sln -o ./analysis -s MyClass
+# Analyze by short method name, output as Markdown, with recursion depth 2
+RoslynCodeAnalyzer -m ProcessOrder -a Full -d 2 -f md
 
-# Include all relationships, output as Markdown with code blocks
-RoslynCodeAnalyzer -i MySolution.sln -r all -n block -f md
+# Output to a specific directory in plain text format
+RoslynCodeAnalyzer -s MyNamespace.MyClass -o ./analysis -f txt
 ```
 
 This will produce files like:
-- `./analysis/MySolution_codecontext.txt` (or `.json`, `.md` depending on options)
+- `./analysis/MySolution_analysis.json` (or `.md`, `.txt` depending on options)
 - `./analysis/MySolution_analyzer.log`
 
 ---
 
 ## Output Format
 
-**Code Context File Example (txt, snippet-level: line):**
-```
-SYMBOL: MyNamespace.MyClass
-Kind: Class
-Definition: src/MyClass.cs:10
-Signature: MyClass
-Code Snippet:
---------------------------------------------------
-public class MyClass
---------------------------------------------------
-References:
-  - src/OtherFile.cs:25
-    Code Snippet:
-    --------------------------------------------------
-var obj = new MyClass();
-    --------------------------------------------------
-  - src/AnotherFile.cs:42
-    Code Snippet:
-    --------------------------------------------------
-return new MyClass();
-    --------------------------------------------------
-
-SYMBOL: MyNamespace.MyClass.MyMethod()
-Kind: Method
-Definition: src/MyClass.cs:25
-Signature: MyMethod()
-References:
-  (No references found in the solution.)
-```
-
-**Code Context File Example (json, snippet-level: none):**
+**Analysis File Example (json):**
 ```json
-[
-  {
-    "symbol": "MyNamespace.MyClass",
-    "kind": "Class",
-    "definition": "src/MyClass.cs:10",
-    "signature": "MyClass",
-    "codeSnippet": null,
-    "references": [
-      { "path": "src/OtherFile.cs", "line": 25, "codeSnippet": null },
-      { "path": "src/AnotherFile.cs", "line": 42, "codeSnippet": null }
-    ]
-  }
-]
-```
-
-**Code Context File Example (md, snippet-level: block):**
-```markdown
-## MyNamespace.MyClass
-**Kind:** Class  
-**Definition:** src/MyClass.cs:10  
-**Signature:** `MyClass`  
-
-```csharp
-public class MyClass
 {
-    // ...
+  "SymbolName": "MyNamespace.MyClass.MyMethod(System.String)",
+  "SymbolKind": "Method",
+  "DefinitionLocation": "src/MyClass.cs:25",
+  "References": [
+    { "FilePath": "src/OtherFile.cs:42" }
+  ],
+  "InternalAnalysis": {
+    "Metrics": { "LinesOfCode": 12, "CyclomaticComplexity": 3, "ParameterCount": 1 },
+    "DataAccessCalls": [
+      { "AccessType": "ADO/EF", "Statement": "db.SaveChanges()", "LineNumber": 10, "IsInsideLoop": false }
+    ],
+    "Loops": [
+      { "LoopType": "for", "NestingLevel": 1, "LineNumber": 8 }
+    ],
+    "CodeSmells": [
+      { "SmellType": "DataTable Usage", "Description": "Instantiation of DataTable.", "LineNumber": 15 }
+    ]
+  },
+  "CalledSymbols": [
+    { /* ...recursive structure... */ }
+  ]
 }
 ```
 
-**References:**
-- `src/OtherFile.cs:25`
-  ```csharp
-  var obj = new MyClass();
-  ```
-- `src/AnotherFile.cs:42`
-  ```csharp
-  return new MyClass();
-  ```
+**Analysis File Example (Markdown):**
+```markdown
+# Code Analysis Report
 
-## MyNamespace.MyClass.MyMethod()
-**Kind:** Method  
-**Definition:** src/MyClass.cs:25  
-**Signature:** `MyMethod()`  
-
-```csharp
-public void MyMethod() { ... }
+## Method: `MyNamespace.MyClass.MyMethod(System.String)`
+- **Defined At:** `src/MyClass.cs:25`
+- **References:**
+  - `src/OtherFile.cs:42`
+- **Internal Analysis:**
+  - **Metrics:** LinesOfCode=`12`, CyclomaticComplexity=`3`
+  - **DB Call:** `db.SaveChanges()` at line 10
+  - **Loop:** A `for` loop with nesting level `1` at line 8
+  - **Smell:** DataTable Usage at line 15
+- **Calls To:**
+  - (nested symbol analysis...)
 ```
 
-**References:**
-- `(No references found in the solution.)`
+**Analysis File Example (txt):**
+```
+SYMBOL: MyNamespace.MyClass.MyMethod(System.String) (Method)
+  Defined At: src/MyClass.cs:25
+  References (1):
+    - src/OtherFile.cs:42
+  Internal Analysis:
+    Metrics: LOC=12, Complexity=3
+    Loop: for (depth 1) at line 8
+    DB Call: db.SaveChanges() at line 10 
+    Smell: DataTable Usage at line 15
+  Calls To:
+    (nested symbol analysis...)
 ```
 
 **Log File Example:**
 ```
-2025-06-24 12:15:33 RoslynCodeAnalyzer started.
-2025-06-24 12:15:33 Input: /path/to/MySolution.sln
-2025-06-24 12:15:33 Output directory: /path/to/analysis
-2025-06-24 12:15:33 Loading workspace... This might take a moment.
-2025-06-24 12:15:36 Workspace loaded. Finding symbols and references...
-2025-06-24 12:15:44 Found 16387 total symbols to analyze.
+2025-07-14 15:20:00 | Analysis engine starting.
+2025-07-14 15:20:00 | Solution/Project: /path/to/MySolution.sln
+2025-07-14 15:20:00 | Analysis Mode: Full
+2025-07-14 15:20:00 | Recursion Depth: 2
 ...
+2025-07-14 15:20:10 | Process finished successfully.
+```
 
 ---
 
@@ -218,53 +181,28 @@ public void MyMethod() { ... }
 
 ## Integrating with AI Coding Agents
 
-RoslynCodeAnalyzer can be seamlessly integrated with AI coding agents such as **Cline**, **Cursor**, **Claude Code**, **Gemini CLI**, and others that support shell command execution and file parsing. This enables advanced code navigation, refactoring, and context-aware code actions on large C# codebases.
+RoslynCodeAnalyzer is designed for seamless integration with AI coding agents such as **Cline**, **Cursor**, **Claude Code**, **Gemini CLI**, and others that support shell command execution and file parsing. This enables advanced code navigation, refactoring, and context-aware code actions on large C# codebases.
 
 ### How AI Agents Leverage RoslynCodeAnalyzer
 
 - **Shell Invocation**: AI agents issue a shell command to run RoslynCodeAnalyzer on your solution or project.
-- **Machine-Readable Output**: The tool produces output in JSON, Markdown, or plain text, which agents can parse for symbol definitions, references, and code snippets.
-- **Automated Code Actions**: Agents use the parsed context to suggest, automate, or apply code changes, refactorings, or navigation actions—especially valuable for large codebases.
+- **Machine-Readable Output**: The tool produces output in JSON, Markdown, or plain text, which agents can parse for symbol definitions, references, and code metrics.
+- **Automated Code Actions**: Agents use the parsed context to suggest, automate, or apply code changes, refactorings, or navigation actions.
 
-### Example Integration Workflow
+#### Example Integration Workflow
 
-1. **Agent issues shell command** (e.g., via terminal or subprocess):
+1. **Agent issues shell command**:
     ```sh
-    RoslynCodeAnalyzer -i MySolution.sln -o ./analysis -f json -n line
+    RoslynCodeAnalyzer -s MyNamespace.MyClass.MyMethod(System.String) -f json -d 1
     ```
 2. **Agent parses the output** (e.g., in Python, TypeScript, or directly in the agent's runtime):
     ```python
     import json
-    with open("./analysis/MySolution_codecontext.json") as f:
+    with open("./analysis/MySolution_analysis.json") as f:
         context = json.load(f)
     # Use 'context' for code search, navigation, or refactoring
     ```
 3. **Agent suggests or applies code actions** based on the analysis.
-
-#### Example: Using with Cline, Cursor, Claude Code, Gemini CLI
-
-- **Cline**: Issues the CLI command, reads the JSON/Markdown output, and uses it for code search, navigation, or automated refactoring.
-- **Cursor**: Integrates the output for in-editor navigation, symbol search, or context-aware code actions.
-- **Claude Code / Gemini CLI**: Consumes Markdown/JSON output to provide context for code suggestions, explanations, or automated changes.
-
-### Tips for Large C# Codebases
-
-- Use the `-s`/`--symbol` option to filter analysis to specific symbols or patterns.
-- Adjust `--relation-level` and `--snippet-level` to control output size and detail.
-- Prefer `-f json` for programmatic consumption by AI agents.
-- For very large solutions, process output in manageable chunks or filter by project/module.
-
-### Workflow Diagram
-
-```mermaid
-graph TD
-  Agent --> CLI
-  CLI --> Analyzer
-  Analyzer --> Output
-  Output --> Agent
-  Agent --> Actions
-  Actions --> Agent
-```
 
 ---
 
